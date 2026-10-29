@@ -66,6 +66,11 @@ jobs:
           python -c "import gui, sys; print('_DND_OK =', gui._DND_OK); sys.exit(0 if gui._DND_OK else 1)"
           # 递归收集自检：造 2 层目录 + 一个假产物 + 一个非 PDF，断言只收 3 个
           python ci_check_recursive.py
+          # GUI 环境自检：打包后 stdout/stderr 为 None，裸 write 会 AttributeError。
+          # 这条防的是「口令错误」被变成未捕获异常的回归。
+          python ci_check_gui_env.py
+          # 子进程静默自检：Windows 上必须带 CREATE_NO_WINDOW，否则每压一个文件闪一次黑窗
+          python -c "import pdfstrip, sys; kw = pdfstrip._SUBPROCESS_KW; print('subprocess kw:', sorted(kw)); assert 'creationflags' in kw, 'CREATE_NO_WINDOW missing'; assert kw['creationflags'] == 0x08000000, 'wrong flag'; assert 'startupinfo' in kw, 'startupinfo missing'"
 
       - name: 打包
         run: pyinstaller build.spec --noconfirm

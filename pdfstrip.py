@@ -43,6 +43,30 @@ import zlib
 warnings.filterwarnings("ignore")
 
 from pypdf import PdfReader
+
+
+# ---------------------------------------------------------------- 子进程静默
+# Windows 下 GUI 程序（console=False 打包）调命令行工具时，系统会给每次调用
+# 新建一个控制台窗口，于是「每压一个文件闪一次黑窗」。必须显式告诉系统不要建。
+# 注意：光设 console=False 不够，那只是主程序不显示控制台；子进程另算。
+#
+# 两层保险一起上：
+#   creationflags=CREATE_NO_WINDOW  —— 根本不创建控制台
+#   startupinfo.dwFlags=STARTF_USESHOWWINDOW + wShowWindow=SW_HIDE —— 万一被创建也立刻隐藏
+# 两者叠加最稳：某些 Python 版本在传递 pipe 时对单个 flag 的处理有差异。
+if sys.platform.startswith("win"):
+    _CREATE_NO_WINDOW = 0x08000000
+    _SUBPROCESS_KW = {"creationflags": _CREATE_NO_WINDOW}
+    try:
+        _si = subprocess.STARTUPINFO()
+        _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        _si.wShowWindow = 0      # SW_HIDE
+        _SUBPROCESS_KW["startupinfo"] = _si
+    except Exception:
+        pass
+else:
+    _SUBPROCESS_KW = {}
+
 from pypdf.generic import (
     ArrayObject, BooleanObject, ByteStringObject, DictionaryObject,
     IndirectObject, NameObject, NullObject, NumberObject, StreamObject,
@@ -179,6 +203,20 @@ def _find_qpdf():
     return shutil.which("qpdf")
 
 
+def _warn(msg):
+    """往 stderr 写一行警告，没有 stderr 就丢弃。
+
+    GUI 版是用 console=False 打包的，此时 sys.stderr 是 None，
+    直接 .write() 会抛 AttributeError，把「口令错误」这类正常失败
+    变成未捕获异常。诊断信息本来只是给命令行用户看的，丢掉无妨。
+    """
+    try:
+        if sys.stderr is not None:
+            sys.stderr.write(msg)
+    except Exception:
+        pass
+
+
 def _qpdf_normalize(src, dst, password="", decrypt=False):
     """用 qpdf 把 PDF 转成普通明文结构，一次搞定两件事：
 
@@ -202,14 +240,16 @@ def _qpdf_normalize(src, dst, password="", decrypt=False):
         cmd.append("--decrypt")
     cmd += [src, dst]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+        # **_SUBPROCESS_KW 在 Windows 上会带上 CREATE_NO_WINDOW，避免每压一个文件闪一次黑窗
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                           **_SUBPROCESS_KW)
     except OSError as e:
         # 可执行文件与本机架构不匹配（如 Windows 版被放到 Linux 上）、权限不足等
-        sys.stderr.write("qpdf 无法执行：%s\n" % e)
+        _warn("qpdf 无法执行：%s\n" % e)
         return False, "qpdf 无法执行：%s" % e
     if r.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
         err = (r.stderr or "").strip()
-        sys.stderr.write(err or "qpdf failed\n")
+        _warn(err or "qpdf failed\n")
         last = err.splitlines()[-1] if err else "qpdf 返回码 %d" % r.returncode
         return False, last
     return True, "ok"
@@ -942,7 +982,8 @@ def render_check(path, timeout=120):
         return None, "none", "no renderer (need PyMuPDF or mutool)"
     cmd = [exe, "draw", "-F", "png", "-o", os.devnull, "-r", "72", path, "1"]
     try:
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=timeout, **_SUBPROCESS_KW)
         if r.returncode == 0:
             return True, "mutool", "ok"
         err = (r.stderr or b"").decode("utf-8", "replace").strip()

@@ -33,6 +33,7 @@ tkinter 本身不支持系统拖放，收到的是普通鼠标事件，拿不到
 
 import os
 import queue
+import subprocess
 import sys
 import threading
 import traceback
@@ -97,6 +98,23 @@ if sys.platform.startswith("win"):
         _DND_OK = True
     except Exception:      # pragma: no cover - 非 Windows 或 API 缺失
         _DND_OK = False
+
+
+def _spawn_quiet(argv):
+    """起一个不弹控制台的子进程（用于打开目录这种可有可无的辅助动作）。
+
+    os.system 在 Windows 上会闪一下控制台窗口；虽然这里只有非 Windows 分支用，
+    但统一走 subprocess + 隐藏窗口参数更稳，避免以后改了平台判断又漏掉。
+    """
+    try:
+        kw = {}
+        if sys.platform.startswith("win"):
+            kw["creationflags"] = 0x08000000          # CREATE_NO_WINDOW
+        subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, **kw)
+    except Exception:
+        pass
+
 
 # 打包后 exe 所在目录要进 sys.path，才能 import 同目录的 pdfstrip
 _here = os.path.dirname(os.path.abspath(
@@ -472,9 +490,9 @@ class App(object):
             if sys.platform.startswith("win"):
                 os.startfile(d)          # noqa: S606
             elif sys.platform == "darwin":
-                os.system('open "%s"' % d)
+                _spawn_quiet(["open", d])
             else:
-                os.system('xdg-open "%s" 2>/dev/null &' % d)
+                _spawn_quiet(["xdg-open", d])
         except Exception as e:
             messagebox.showwarning(APP_TITLE, "打不开目录：%s" % e)
 
@@ -612,12 +630,56 @@ class App(object):
             messagebox.showinfo(APP_TITLE, text)
 
 
+def _install_excepthook(root):
+    """把未捕获异常变成正常对话框。
+
+    console=False 打包后没有终端可以看堆栈，PyInstaller 的默认行为是弹一个
+    原始 traceback 窗口，用户看不懂也复制不了。这里接管掉，只显示一句人话，
+    同时把完整堆栈写进同目录的 pdfcompress_error.log，方便排查。
+    """
+    def hook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            return
+        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        try:
+            if getattr(sys, "frozen", False):
+                logdir = os.path.dirname(os.path.abspath(sys.executable))
+            else:
+                logdir = os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(logdir, "pdfcompress_error.log"), "a",
+                      encoding="utf-8") as f:
+                f.write(detail)
+                f.write("\n" + "-" * 60 + "\n")
+        except Exception:
+            pass
+        try:
+            messagebox.showerror(
+                APP_TITLE,
+                "程序遇到一个未处理的问题：\n\n%s: %s\n\n"
+                "完整记录已写入程序同目录的 pdfcompress_error.log。"
+                % (exc_type.__name__, exc_value))
+        except Exception:
+            pass
+
+    sys.excepthook = hook
+
+    # Tk 回调里抛的异常不走 sys.excepthook，单独接一层
+    def tk_hook(exc_type, exc_value, exc_tb):
+        hook(exc_type, exc_value, exc_tb)
+
+    try:
+        root.report_callback_exception = tk_hook
+    except Exception:
+        pass
+
+
 def main():
     # argv 可以是文件，也可以是文件夹；统一交给 collect_pdfs 展开
     skips = []
     initial = collect_pdfs(sys.argv[1:], skips) if len(sys.argv) > 1 else []
 
     root = tk.Tk()
+    _install_excepthook(root)
     # 不再「一个文件一个窗口」：拖文件夹进来可能有上百个 PDF，
     # 开上百个窗口会直接把系统拖死。统一单窗口内排队，进度条走一遍。
     app = App(root, initial, autorun=bool(initial))
