@@ -47,6 +47,16 @@ a = Analysis(
         # PyInstaller 直接报 "Hidden import not found" 失败。
         "pypdf._crypt_providers",
         "pypdf._crypt_providers._cryptography",
+        # cryptography 是纯 Rust 扩展，pypdf 通过 aes_cbc_encrypt 这类函数间接调用，
+        # PyInstaller 的静态分析扫不到 Rust 侧的 .pyd，必须显式声明，
+        # 否则处理加密 PDF 时会在包里抛 DependencyError。
+        "cryptography",
+        "cryptography.hazmat.primitives.ciphers",
+        "cryptography.hazmat.primitives.ciphers.algorithms",
+        "cryptography.hazmat.primitives.ciphers.modes",
+        "cryptography.hazmat.primitives.hashes",
+        "cryptography.hazmat.primitives.padding",
+        "cryptography.hazmat.backends.openssl",
     ],
     hookspath=[],
     hooksconfig={},

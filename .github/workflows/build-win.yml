@@ -37,23 +37,30 @@ jobs:
 
       - name: 冒烟测试
         shell: pwsh
+        # 全部输出用 ASCII：Windows 控制台默认 cp1252，打印中文会 UnicodeEncodeError
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
-          python -c "import pypdf; print('pypdf', pypdf.__version__)"
-          # 精简版不打包 pymupdf，这里断言它确实没被引入
-          python -c "import importlib.util as u; assert u.find_spec('pymupdf') is None, '精简版不应安装 pymupdf'; print('pymupdf 未安装（符合预期）')"
+          python -c "import pypdf, cryptography; print('pypdf', pypdf.__version__, '| cryptography', cryptography.__version__)"
+          # 精简版不打包 pymupdf，断言它确实没被引入
+          python -c "import importlib.util as u; assert u.find_spec('pymupdf') is None, 'pymupdf should not be installed'; print('pymupdf: not installed (expected)')"
           # _find_qpdf 必须能定位到随包 qpdf，否则打出来的 exe 会失去去线性化/解密能力
           python -c "import pdfstrip, os, sys; p = pdfstrip._find_qpdf(); print('qpdf ->', p); sys.exit(0 if p and os.path.isfile(p) else 1)"
-          # 用 qpdf 从一个最小 PDF 生成合法测试件（qpdf 会重算 xref 偏移；手写 startxref 容易错，pypdf 会拒绝加载）
-          python -c "open('mini.pdf','wb').write(b'%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]>>endobj\ntrailer<</Root 1 0 R/Size 4>>\nstartxref\n0\n%%EOF\n')"
-          python -c "import subprocess, os; q=os.path.join('tools','qpdf.exe'); subprocess.run([q,'--warning-exit-0','mini.pdf','smoke.pdf'],check=True)"
+          # AES 解密能力自检：cryptography 缺失时这里就会失败，比压整份文件更早暴露
+          python -c "from pypdf._crypt_providers import crypt_provider; print('crypt provider:', crypt_provider); assert crypt_provider[0] != 'fallback', 'cryptography missing'"
+          # 用 qpdf 从一个最小 PDF 生成合法测试件（手写 startxref 容易被 pypdf 拒绝）
+          python -c "open('mini.pdf','wb').write(b'%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Resources<</ProcSet[/PDF]>>>>endobj\ntrailer<</Root 1 0 R/Size 4>>\nstartxref\n0\n%%EOF\n')"
+          python -c "import subprocess, os; q=os.path.join('tools','qpdf.exe'); subprocess.run([q,'--warning-exit-0','--object-streams=disable','mini.pdf','smoke.pdf'],check=True)"
           python pdfstrip.py smoke.pdf -o smoke_out.pdf
           python -c "import os; a, b = os.path.getsize('smoke.pdf'), os.path.getsize('smoke_out.pdf'); print('smoke', a, '->', b); assert b > 0"
-          # 关键回归：加密 + 线性化 文件必须能被 qpdf 解开并压掉
+          # 关键回归 1：加密 + 线性化 文件必须能被 qpdf 解开并压掉
           python -c "import subprocess, os; q=os.path.join('tools','qpdf.exe'); subprocess.run([q,'--encrypt','','123456','256','--','--linearize','smoke.pdf','smoke_enc.pdf'],check=True)"
           python pdfstrip.py smoke_enc.pdf -o smoke_enc_out.pdf -p 123456
           python -c "import os; s=os.path.getsize('smoke_enc_out.pdf'); print('enc smoke ->', s); assert s > 0"
-          # 错口令必须报错退出，而不是静默产出损坏文件
-          python -c "import subprocess, sys; r=subprocess.run([sys.executable,'pdfstrip.py','smoke_enc.pdf','-o','x.pdf','-p','wrong'],capture_output=True,text=True); print('错口令退出码', r.returncode); assert r.returncode != 0 and not __import__('os').path.exists('x.pdf')"
+          # 关键回归 2：压出来的文件不能再是加密的
+          python -c "from pypdf import PdfReader; r=PdfReader('smoke_enc_out.pdf'); assert not r.is_encrypted, 'output still encrypted'; print('output decrypted: ok,', len(r.pages), 'page(s)')"
+          # 关键回归 3：错口令必须报错退出，而不是静默产出文件
+          python -c "import subprocess, sys, os; r=subprocess.run([sys.executable,'pdfstrip.py','smoke_enc.pdf','-o','x.pdf','-p','wrong'],capture_output=True,text=True); print('wrong password exit code:', r.returncode); assert r.returncode != 0 and not os.path.exists('x.pdf'), 'wrong password must fail without output'"
 
       - name: 打包
         run: pyinstaller build.spec --noconfirm
