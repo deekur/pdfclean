@@ -57,6 +57,10 @@ a = Analysis(
         "cryptography.hazmat.primitives.hashes",
         "cryptography.hazmat.primitives.padding",
         "cryptography.hazmat.backends.openssl",
+        # gui.py 用 ctypes 接 Windows 拖放（WM_DROPFILES）。wintypes 是子模块，
+        # 显式声明避免某些 PyInstaller 版本分析不到。
+        "ctypes",
+        "ctypes.wintypes",
     ],
     hookspath=[],
     hooksconfig={},

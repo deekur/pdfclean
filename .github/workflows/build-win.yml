@@ -61,6 +61,11 @@ jobs:
           python -c "from pypdf import PdfReader; r=PdfReader('smoke_enc_out.pdf'); assert not r.is_encrypted, 'output still encrypted'; print('output decrypted: ok,', len(r.pages), 'page(s)')"
           # 关键回归 3：错口令必须报错退出，而不是静默产出文件
           python -c "import subprocess, sys, os; r=subprocess.run([sys.executable,'pdfstrip.py','smoke_enc.pdf','-o','x.pdf','-p','wrong'],capture_output=True,text=True); print('wrong password exit code:', r.returncode); assert r.returncode != 0 and not os.path.exists('x.pdf'), 'wrong password must fail without output'"
+          # 拖放依赖自检：gui.py 用 ctypes 接 WM_DROPFILES，缺 wintypes 会导致拖入失效
+          python -c "import ctypes, ctypes.wintypes; print('ctypes.wintypes ok')"
+          python -c "import gui, sys; print('_DND_OK =', gui._DND_OK); sys.exit(0 if gui._DND_OK else 1)"
+          # 递归收集自检：造 2 层目录 + 一个假产物 + 一个非 PDF，断言只收 3 个
+          python ci_check_recursive.py
 
       - name: 打包
         run: pyinstaller build.spec --noconfirm
