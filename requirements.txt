@@ -1,0 +1,3 @@
+# 精简版依赖：不含 pymupdf（解密改由随包 qpdf 完成，体积省 20 MB）
+pypdf==3.17.4
+pyinstaller==6.22.3
