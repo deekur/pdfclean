@@ -321,11 +321,19 @@ class Strip:
             if enc and not self.decrypted:
                 # 加密文件拿不到明文版本就没法继续，这里必须停。
                 # qpdf 口令错误的报错含 "invalid password"，单独给更好懂的提示。
+                #
+                # 提示文案面向普通用户：图形界面里没有命令行的概念，
+                # 不要把「请用 -p 提供口令」这种参数名甩给用户。
                 low = (self.lin_reason or "").lower()
                 if "password" in low or "invalid" in low:
-                    raise SystemExit("文件已加密，且当前口令无法解开。请用 -p 提供口令。\n%s"
-                                     % self.lin_reason)
-                raise SystemExit("文件已加密，解密失败（依赖随包 qpdf）。\n%s"
+                    if password:
+                        raise SystemExit(
+                            "这个 PDF 设置了打开密码，当前填的密码不对。\n"
+                            "（如果是别人发来的文件，请向发件人确认密码。）")
+                    raise SystemExit(
+                        "这个 PDF 设置了打开密码，没有密码无法读取内容。\n"
+                        "本工具不提供密码输入，请先用阅读器打开后另存一份不加密的副本。")
+                raise SystemExit("这个 PDF 已加密，但解不开（解密组件异常）。\n%s"
                                  % (self.lin_reason or "未知原因"))
 
         self.reader = PdfReader(self.path, strict=False)

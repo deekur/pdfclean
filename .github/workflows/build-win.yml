@@ -61,6 +61,12 @@ jobs:
           python -c "from pypdf import PdfReader; r=PdfReader('smoke_enc_out.pdf'); assert not r.is_encrypted, 'output still encrypted'; print('output decrypted: ok,', len(r.pages), 'page(s)')"
           # 关键回归 3：错口令必须报错退出，而不是静默产出文件
           python -c "import subprocess, sys, os; r=subprocess.run([sys.executable,'pdfstrip.py','smoke_enc.pdf','-o','x.pdf','-p','wrong'],capture_output=True,text=True); print('wrong password exit code:', r.returncode); assert r.returncode != 0 and not os.path.exists('x.pdf'), 'wrong password must fail without output'"
+          # 关键回归 4：只限制权限、不需要密码就能打开的加密 PDF（最常见的一类），
+          # 必须能正常压缩并解密。用户反馈过这类文件打不开，加断言防回归。
+          python -c "import subprocess, os; q=os.path.join('tools','qpdf.exe'); subprocess.run([q,'--encrypt','','','256','--print=none','--modify=none','--','smoke.pdf','smoke_perm.pdf'],check=True)"
+          python -c "from pypdf import PdfReader; assert PdfReader('smoke_perm.pdf').is_encrypted, 'sample should be encrypted'"
+          python pdfstrip.py smoke_perm.pdf -o smoke_perm_out.pdf
+          python -c "from pypdf import PdfReader; r=PdfReader('smoke_perm_out.pdf'); assert not r.is_encrypted, 'perm-only encrypted pdf must be decrypted'; print('perm-only encrypt: ok,', len(r.pages), 'page(s)')"
           # 拖放依赖自检：gui.py 用 ctypes 接 WM_DROPFILES，缺 wintypes 会导致拖入失效
           python -c "import ctypes, ctypes.wintypes; print('ctypes.wintypes ok')"
           python -c "import gui, sys; print('_DND_OK =', gui._DND_OK); sys.exit(0 if gui._DND_OK else 1)"
