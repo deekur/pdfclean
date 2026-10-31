@@ -597,10 +597,14 @@ class App(object):
                 _, src, dst, old, new, saved, info = r
                 self.lbl_state.config(text="完成：%s → %s，节省 %.1f%%"
                                       % (human(old), human(new), saved))
+                extra = ""
+                if info.get("img_slimmed"):
+                    extra = "\n图片：%d 张已清除 EXIF/GPS，共省 %s" % (
+                        info["img_slimmed"], human(info.get("img_saved", 0)))
                 messagebox.showinfo(
                     APP_TITLE,
-                    "压缩完成\n\n原文件：%s\n压缩后：%s\n节省：%.1f%%\n输出：%s"
-                    % (human(old), human(new), saved, dst))
+                    "压缩完成\n\n原文件：%s\n压缩后：%s\n节省：%.1f%%%s\n输出：%s"
+                    % (human(old), human(new), saved, extra, dst))
             else:
                 self.lbl_state.config(text="失败")
                 messagebox.showerror(APP_TITLE, "压缩失败：%s\n\n%s"
@@ -637,6 +641,11 @@ class App(object):
             lines.append("  … 还有 %d 个失败项未列出" % (len(bad) - LIMIT))
 
         text = summary + "\n\n" + "\n".join(lines)
+        img_n = sum(r[6].get("img_slimmed", 0) for r in ok)
+        if img_n:
+            img_s = sum(r[6].get("img_saved", 0) for r in ok)
+            text = summary + "\n图片：%d 张已清除 EXIF/GPS，共省 %s\n\n" % (
+                img_n, human(img_s)) + "\n".join(lines)
         if bad:
             messagebox.showwarning(APP_TITLE, text)
         else:

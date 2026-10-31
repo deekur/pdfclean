@@ -31,6 +31,7 @@ pdfstrip —— 通用 PDF 深度清理器（零元数据 / 零压缩 / 按需�
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -38,6 +39,8 @@ import subprocess
 import sys
 import warnings
 import zlib
+
+import jpegmeta
 
 warnings.filterwarnings("ignore")
 
@@ -294,7 +297,8 @@ class Strip:
         self.deleted = set()  # 明确删除的对象号：重走可达性时禁止复活
         self.newmap = {}
         self.stats = {"annot_dropped": 0, "outline_dropped": 0, "form_dropped": 0,
-                      "media_kept": 0, "xmp_nuked": 0, "reencoded": 0}
+                      "media_kept": 0, "xmp_nuked": 0, "reencoded": 0,
+                      "img_total": 0, "img_slimmed": 0, "img_saved": 0}
 
     # ---------------------------------------------------------- 文件头
     @staticmethod
@@ -428,6 +432,7 @@ class Strip:
         # 普通流里的 XMP 包：只对明确的 Metadata/XML 流做（保守策略，
         # 避免 Form XObject / CharProcs / 内容流被误杀成丢图或白页）
         self._xmp_pack_scan()
+        self._slim_images()
 
         if self.clean_content:
             self._clean_pages_content()
@@ -475,7 +480,9 @@ class Strip:
 
     def _is_media(self, o):
         """图像 / 字体程序 / ICC / 嵌入文件：这些流的字节一旦变动，
-        阅读器渲染结果或字体度量就会变，因此只删字典键、不动数据。"""
+        阅读器渲染结果或字体度量就会变，因此只删字典键、不动数据。
+        JPEG 图像是唯一例外：由 _slim_images() 剥掉 APP 元数据段，
+        熵编码码流仍原样保留，像素不变。"""
         typ = self._typ(o)
         sub = self._typ(o, "/Subtype")
         if typ == "/XObject" and sub == "/Image":
@@ -489,6 +496,114 @@ class Strip:
         if typ == "/EmbeddedFile":
             return True
         return bool(o.get("/ImageMask") is not None)
+
+    @staticmethod
+    def _filters(o):
+        """把 /Filter 归一成名字列表，单个名字也包一层。"""
+        f = o.get("/Filter")
+        if isinstance(f, IndirectObject):
+            try:
+                f = f.get_object()
+            except Exception:
+                return []
+        if f is None:
+            return []
+        if isinstance(f, (list, tuple, ArrayObject)):
+            return [str(x) for x in f]
+        return [str(f)]
+
+    @staticmethod
+    def _unwrap(raw, names):
+        """剥掉 DCT 之前的外层编码，返回裸 JPEG；有不认识的层则 None。
+
+        reportlab 一类生成器写的是 [/ASCII85Decode /DCTDecode]，
+        流里存的是 ASCII85 文本（比裸数据胖 25%），必须先解码。
+        """
+        data = bytes(raw)
+        for nm in names:
+            u = nm.upper()
+            try:
+                if u == "/ASCII85DECODE":
+                    s = data.strip()
+                    if s.endswith(b"~>"):
+                        s = s[:-2]
+                    data = base64.a85decode(s, adobe=False,
+                                            ignorechars=b" \t\n\r\v\f")
+                elif u == "/FLATEDECODE":
+                    data = zlib.decompress(data)
+                else:
+                    return None
+            except Exception:
+                return None
+        return data
+
+    @staticmethod
+    def _fix_parms(o, n):
+        """改了 /Filter 之后，/DecodeParms 数组要跟着塌成对应 DCT 的那一项。"""
+        dp = o.get("/DecodeParms")
+        if isinstance(dp, IndirectObject):
+            try:
+                dp = dp.get_object()
+            except Exception:
+                dp = None
+        if not isinstance(dp, (list, tuple, ArrayObject)):
+            return
+        if len(dp) != n:
+            return
+        last = dp[-1]
+        if isinstance(last, NullObject):
+            try:
+                del o[NameObject("/DecodeParms")]
+            except KeyError:
+                pass
+        else:
+            o[NameObject("/DecodeParms")] = last
+
+    def _slim_images(self):
+        """剥掉每张 JPEG 图的元数据段，只有确实变小才替换。
+
+        只碰 /Subtype /Image 且末层是 DCTDecode 的流：JPX（JPEG 2000）
+        不是段结构，Flate 图压根没有 EXIF。外层若是 ASCII85 一并去掉——
+        那层编码本身就有 25% 膨胀，比只删 EXIF 省得多。
+        """
+        for o in self.objs.values():
+            if not isinstance(o, StreamObject):
+                continue
+            if self._typ(o, "/Subtype") != "/Image":
+                continue
+            names = self._filters(o)
+            if not names or "DCTDECODE" not in names[-1].upper():
+                continue
+            outer = names[:-1]
+            if len(outer) > 1:
+                continue            # LZW/CCITT 等少见组合，不为它加复杂度
+            raw = getattr(o, "_data_encoded", None)
+            if raw is None:
+                raw = getattr(o, "_data", None)
+            if not isinstance(raw, (bytes, bytearray)) or not raw:
+                continue
+            self.stats["img_total"] += 1
+            jpg = self._unwrap(raw, outer) if outer else bytes(raw)
+            if not jpg:
+                continue
+            slim = jpegmeta.strip(jpg)
+            body = slim if slim is not None else jpg
+            if len(body) >= len(raw):
+                continue
+            if hasattr(o, "_data_encoded"):
+                o._data_encoded = body
+            else:
+                o._data = body
+            if outer:
+                o[NameObject("/Filter")] = NameObject("/DCTDecode")
+                self._fix_parms(o, len(names))
+            # 解码缓存还指着旧字节，不失效会让后面的 get_data() 读到剥离前的内容
+            try:
+                o.decoded_self = None
+            except Exception:
+                pass
+            self.stats["img_slimmed"] += 1
+            self.stats["img_saved"] += len(raw) - len(body)
 
     def _deep_drop(self, o, depth):
         if depth > 40:

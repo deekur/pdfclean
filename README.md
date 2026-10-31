@@ -67,8 +67,9 @@ pyinstaller build.spec --noconfirm
 | 重复 / 孤儿对象 | 5%–15% | 多次编辑残留的废弃对象、从未被绘制的图片资源 |
 | 线性化开销 | 视文件而定 | `/Linearized` 字典、提示表、双份 xref，清理后必然失效 |
 | 元数据 | <1% | Word 标题、作者名、PScript5、Distiller 等指纹 |
+| 图片内嵌元数据 | 视照片而定 | JPEG 的 EXIF / GPS / IPTC / 注释段整段剥掉，码流原样保留 |
 
-字体、图片、内容流字节、页面尺寸一律不动，所以渲染结果逐字节相同。
+字体、内容流字节、页面尺寸一律不动，所以渲染结果逐字节相同。JPEG 图片是个例外但同样无损：只删 APP 段（相机型号、拍摄时间、GPS 坐标），SOS 之后的熵编码数据一个字节都不改，像素不变。若图像流外面套了 ASCII85 编码，连那层 25% 的膨胀一起去掉。
 
 ---
 
@@ -89,6 +90,7 @@ pyinstaller build.spec --noconfirm
 | owner 密码 | 同样能解 |
 | 权限加密（user 密码为空） | 不填密码即可解开 |
 | 口令错误 | 退出码非 0，且不产出任何文件 |
+| JPEG 图片清理（`photos.pdf`） | 2 张图（含一张 CMYK）EXIF/GPS 全消失，码流未重编码，输出体积 78.4% |
 
 ---
 
@@ -151,10 +153,11 @@ python pdfstrip.py 加密.pdf -p 口令 -o 输出.pdf     # 加密文件给口�
 pdfclean/
 ├─ pdfstrip.py              清理引擎（也可单独当命令行用）
 ├─ pdfdecrypt.py            加密 PDF 解密（RC4 / AES，纯 Python）
+├─ jpegmeta.py              JPEG 元数据段剥离（EXIF/GPS/IPTC，码流不动）
 ├─ gui.py                   图形界面
 ├─ build.spec               PyInstaller 打包配置（无外部二进制）
 ├─ requirements.txt         打包环境依赖
-├─ tests/                   回归样本（含四种加密算法与权限加密）
+├─ tests/                   回归样本（四种加密 + 权限加密 + 带 EXIF 的照片）
 ├─ ci_check_engine.py       引擎回归（CI 主入口）
 ├─ ci_check_gui_env.py      GUI 无控制台环境自检
 ├─ ci_check_recursive.py    文件夹递归收集自检

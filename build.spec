@@ -24,6 +24,7 @@ a = Analysis(
     hiddenimports=[
         "pdfstrip",
         "pdfdecrypt",
+        "jpegmeta",
         "pypdf",
         # pycryptodome 的 AES 是 C 扩展（_raw_aes 等），静态分析有时扫不到
         "Crypto",
