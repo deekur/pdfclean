@@ -35,7 +35,6 @@ import json
 import os
 import re
 import subprocess
-import shutil
 import sys
 import warnings
 import zlib
@@ -173,85 +172,38 @@ def sniff_linearized(path):
     return info
 
 
-def _find_qpdf():
-    """按优先级找 qpdf：环境变量 → 程序同目录 → 同目录 tools/ → PATH。
-
-    打包成单文件时，spec 里的 binaries 会把 tools/ 下的 qpdf 解压到
-    sys._MEIPASS/tools/ 而不是 exe 所在目录，所以两个根都要找。
-    带 .exe 的候选只在 Windows 上考虑：源码目录里可能放着 Windows 版 tools/，
-    在 Linux/macOS 上跑源码时会先撞上 qpdf.exe 报 Exec format error。
-    """
-    env = os.environ.get("PDFSTRIP_QPDF")
-    if env and os.path.exists(env):
-        return env
-    win = sys.platform.startswith("win")
-    names = ["qpdf.exe", "qpdf"] if win else ["qpdf"]
-    roots = []
-    if getattr(sys, "frozen", False):
-        roots.append(os.path.dirname(os.path.abspath(sys.executable)))
-        meipass = getattr(sys, "_MEIPASS", None)     # 单文件模式解压出来的临时根
-        if meipass:
-            roots.append(meipass)
-    else:
-        roots.append(os.path.dirname(os.path.abspath(__file__)))
-    for base in roots:
-        for sub in ("", "tools"):
-            for nm in names:
-                p = os.path.join(base, sub, nm)
-                if os.path.isfile(p):
-                    return p
-    return shutil.which("qpdf")
+def _has_encrypt(path):
+    """判断文件是否带 /Encrypt。不走 pypdf 的 is_encrypted：那条路依赖
+    cryptography 后端，缺了会抛异常，判断结果也随库版本变化。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return False
+    tpos = data.rfind(b"trailer")
+    tail = data[tpos:] if tpos >= 0 else data[-4096:]
+    if re.search(rb"/Encrypt\s*(\d+\s+\d+\s+R|<<)", tail):
+        return True
+    # xref 流的结构里 /Encrypt 只出现在交叉引用字典，全文兜底一次
+    return bool(re.search(rb"/Encrypt\s+\d+\s+\d+\s+R", data))
 
 
-def _warn(msg):
-    """往 stderr 写一行警告，没有 stderr 就丢弃。
+def _pure_decrypt(src, dst, password=""):
+    """用内置的 pdfdecrypt 解开 /Standard 加密，输出重建过的明文 PDF。
 
-    GUI 版是用 console=False 打包的，此时 sys.stderr 是 None，
-    直接 .write() 会抛 AttributeError，把「口令错误」这类正常失败
-    变成未捕获异常。诊断信息本来只是给命令行用户看的，丢掉无妨。
+    解密产物本身已经是重写过的普通结构（pdfdecrypt 重建 catalog 与 xref），
+    线性化字典、提示表、双份 xref 一并消失，所以不再需要单独「去线性化」。
+    返回 (ok, reason)；失败不抛异常，由上层决定提示文案。
     """
     try:
-        if sys.stderr is not None:
-            sys.stderr.write(msg)
-    except Exception:
-        pass
-
-
-def _qpdf_normalize(src, dst, password="", decrypt=False):
-    """用 qpdf 把 PDF 转成普通明文结构，一次搞定两件事：
-
-    1) 去线性化 —— 不带 --linearize 时输出天然是非线性化的普通结构
-       （/Linearized 字典、提示表、双份 xref 全部消失）。
-    2) 解密 —— 带 --decrypt 时同时移除 /Encrypt 和全部加密字典。
-       qpdf 的 --decrypt 是一步到位，不像 pypdf 手动重写那样留下 /Encrypt 残键。
-
-    两者合并成一次调用：输入既是线性化又加密时，不必产生两个临时文件。
-
-    返回 (ok, reason)。找不到 qpdf 或执行失败都只返回 False，不抛异常：
-    这一步是可选优化，拿不到就按原文件走常规清理，只是少省一点体积，
-    不该让整次压缩失败（目标用户机器上可能根本没有 qpdf）。"""
-    exe = _find_qpdf()
-    if not exe:
-        return False, "找不到 qpdf"
-    cmd = [exe, "--warning-exit-0"]
-    if password:
-        cmd.append("--password=" + password)
-    if decrypt:
-        cmd.append("--decrypt")
-    cmd += [src, dst]
-    try:
-        # **_SUBPROCESS_KW 在 Windows 上会带上 CREATE_NO_WINDOW，避免每压一个文件闪一次黑窗
-        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                           **_SUBPROCESS_KW)
-    except OSError as e:
-        # 可执行文件与本机架构不匹配（如 Windows 版被放到 Linux 上）、权限不足等
-        _warn("qpdf 无法执行：%s\n" % e)
-        return False, "qpdf 无法执行：%s" % e
-    if r.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
-        err = (r.stderr or "").strip()
-        _warn(err or "qpdf failed\n")
-        last = err.splitlines()[-1] if err else "qpdf 返回码 %d" % r.returncode
-        return False, last
+        import pdfdecrypt
+    except Exception as e:
+        return False, "内置解密模块加载失败：%s" % e
+    ok, why = pdfdecrypt.decrypt_file(src, dst, password or "")
+    if not ok:
+        return False, why
+    if not os.path.exists(dst) or os.path.getsize(dst) == 0:
+        return False, "解密输出为空"
     return True, "ok"
 
 
@@ -293,48 +245,47 @@ class Strip:
         self.delinearized = False
         self.decrypted = False
         self.lin_info = sniff_linearized(src)
-        self.path = src          # 实际读取的路径（可能被去线性化/解密替换）
+        self.path = src          # 实际读取的路径（加密时替换为解密后的明文）
         self.src_has_objstm, self.src_has_xrefstm = _sniff_layout(src)
-        try:
-            enc = PdfReader(src, strict=False).is_encrypted
-        except Exception:
-            enc = False
+        enc = _has_encrypt(src)
 
-        # 加密和线性化都交给 qpdf 一次处理：--decrypt 顺手去掉 /Encrypt，
-        # 不带 --linearize 的输出天然是普通结构。pypdf 手写重写会留下 /Encrypt
-        # 残键，所以原先那条 PyMuPDF 路径整个不需要了（包里也不再带 pymupdf）。
+        # 加密文件先解成明文临时文件：pypdf 直接读写加密文件会把 /Encrypt
+        # 及相关键留在输出里，而 pdfdecrypt 重建出的结构本来就是干净的。
+        # 线性化不需要预处理——build() 永远重写 catalog 与 xref，输出天然
+        # 不带 /Linearized、提示表和双份 xref。
         self.tmp_lin = None
-        self.lin_reason = None
-        if enc or self.lin_info["linearized"]:
+        if enc:
             self.tmp_lin = _mkstemp_path()
-            ok, why = _qpdf_normalize(src, self.tmp_lin, password, decrypt=enc)
+            ok, why = _pure_decrypt(src, self.tmp_lin, password)
             if ok:
                 valid, vwhy = _quick_validate(self.tmp_lin)
-                if valid:
-                    self.path = self.tmp_lin
-                    self.delinearized = bool(self.lin_info["linearized"])
-                    self.decrypted = enc
-                else:
-                    self.lin_reason = vwhy
+                if not valid:
+                    raise SystemExit("这个 PDF 已加密，解密后的文件读不了（%s）。" % vwhy)
+                self.path = self.tmp_lin
+                self.decrypted = True
+            elif "未发现加密字典" in (why or ""):
+                # /Encrypt 只出现在正文或误判：按普通文件继续，别把好文件拦下
+                p, self.tmp_lin = self.tmp_lin, None
+                try:
+                    if p:
+                        os.unlink(p)
+                except OSError:
+                    pass
             else:
-                self.lin_reason = why
-            if enc and not self.decrypted:
-                # 加密文件拿不到明文版本就没法继续，这里必须停。
-                # qpdf 口令错误的报错含 "invalid password"，单独给更好懂的提示。
-                #
-                # 提示文案面向普通用户：图形界面里没有命令行的概念，
-                # 不要把「请用 -p 提供口令」这种参数名甩给用户。
-                low = (self.lin_reason or "").lower()
-                if "password" in low or "invalid" in low:
+                # 提示文案面向普通用户，不要把「请用 -p 提供口令」甩给 GUI 用户
+                low = (why or "").lower()
+                if "密码" in (why or "") or "password" in low or "invalid" in low:
                     if password:
                         raise SystemExit(
                             "这个 PDF 设置了打开密码，当前填的密码不对。\n"
                             "（如果是别人发来的文件，请向发件人确认密码。）")
                     raise SystemExit(
                         "这个 PDF 设置了打开密码，没有密码无法读取内容。\n"
-                        "本工具不提供密码输入，请先用阅读器打开后另存一份不加密的副本。")
-                raise SystemExit("这个 PDF 已加密，但解不开（解密组件异常）。\n%s"
-                                 % (self.lin_reason or "未知原因"))
+                        "请在窗口里填入打开密码后再试。")
+                raise SystemExit("这个 PDF 已加密，但解不开。\n%s"
+                                 % (why or "未知原因"))
+        # 输入是线性化文件时，重写后的输出一定不再是线性化结构
+        self.delinearized = bool(self.lin_info["linearized"])
 
         self.reader = PdfReader(self.path, strict=False)
         self.header = self._sniff_header(self.path)
@@ -856,12 +807,8 @@ class Strip:
         if self.root_num not in self.objs:
             raise SystemExit("清理后 /Root 不可达，文件可能已损坏。")
         self.root = self.objs[self.root_num]
-        # 基准体积取「真正被清理的那个文件」：去线性化后用的是临时普通 PDF，
-        # 这样 ratio 反映的是清理本身的收益，而不是把去线性化的开销算进来。
-        # path != src 说明当前处理的是解密/去线性化后的临时文件，基准也用它，
-        # 否则分母是加密原文、分子是明文输出，ratio 口径不一致
-        base_path = self.path if self.path != self.src else self.src
-        base_size = os.path.getsize(base_path)
+        # 体积口径统一用原始文件：加密件解密后的收益也算在压缩比里，
+        # 用户看到的「8.2 MB → 0.9 MB」才是他手上那个文件的变化。
         src_size = os.path.getsize(self.src)
 
         # 三种布局全部试算取最小（代价只是多两次内存拼装，文件级开销可忽略）。
@@ -891,12 +838,6 @@ class Strip:
         if self.lin_info["linearized"]:
             info["linearized_in"] = True
             info["delinearized"] = self.delinearized
-            if self.delinearized:
-                info["baseline"] = base_size
-                info["ratio_vs_deflinear"] = round(len(data) / base_size * 100, 1)
-                info["lin_saved"] = src_size - base_size
-            elif self.lin_reason:
-                info["lin_error"] = self.lin_reason
         return info
 
 

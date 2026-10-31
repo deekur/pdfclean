@@ -1,9 +1,10 @@
 # PDF 无损压缩 —— Windows 打包说明
 
 把一个 PDF 文件拖到这个程序上，几秒钟后同目录出现一个 `<原名>_cleaned.pdf`，
-体积通常只剩 **5%–10%**，画面和文字一个像素、一个字都不变。
+体积通常只剩 **5%–10%**，画面和文字一个像素、一个字都不变。加密 PDF 直接填打开密码即可。
 
-> 手上这份 `pdfstrip-win-src.zip` 已内置 Windows 64 位 qpdf，解压即可用。
+> 本版**不再依赖 qpdf 或任何外部可执行文件**：解密由项目内的 `pdfdecrypt.py`
+> 完成（纯 Python + pycryptodome），去线性化由引擎重写结构时顺带完成。
 > 想要一个双击就能跑的 `.exe`，按下面路线 A 或 B 打一次包即可 ——
 > 打包必须在一台 Windows 机器（或 GitHub 的 Windows 云机）上做，
 > PyInstaller 不支持交叉编译，在 Linux/Mac 上打不出 Windows 程序。
@@ -15,10 +16,10 @@
 ### 路线 A：GitHub Actions 自动构建（推荐，不用装任何东西）
 
 1. 新建一个 GitHub 仓库（公开/私有都行）。
-2. 把本目录**整个** `pdfstrip/` 传上去，注意 `.github/` 也要一起传（隐藏目录，
+2. 把本目录**整个**传上去，注意 `.github/` 也要一起传（隐藏目录，
    用 GitHub Desktop 或 `git add -A` 才会带上）。
 3. 打开仓库的 **Actions** 页，左侧选 `build-windows`，点 **Run workflow**。
-4. 等约 4 分钟，进这次运行页面，底部 **Artifacts** 下载
+4. 等约 3 分钟，进这次运行页面，底部 **Artifacts** 下载
    `PDFCompress-windows-x64.zip`，解压得到 `PDFCompress.exe`。
 
 上传后 push 到 `main` 也会自动触发，不必手动点。
@@ -33,22 +34,11 @@
 ```powershell
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-
-# 下载 qpdf（Windows 64 位版，约 8 MB）
-$url = "https://sourceforge.net/projects/qpdf/files/qpdf/12.4.2/qpdf-12.4.2-msvc64.zip/download"
-Invoke-WebRequest -Uri $url -OutFile qpdf.zip -UseBasicParsing
-Expand-Archive qpdf.zip -DestinationPath qpdf_tmp
-New-Item -ItemType Directory -Force -Path tools | Out-Null
-Copy-Item "qpdf_tmp\qpdf-12.4.2-msvc64\bin\*" tools\ -Recurse
-
-# 打包
 pyinstaller build.spec --noconfirm
 ```
 
-产物在 `dist\PDFCompress.exe`，单文件、约 20 MB，双击即用，无需安装 Python。
+产物在 `dist\PDFCompress.exe`，单文件、双击即用，无需安装 Python。
 文件名可以随意改成中文（如 `PDF无损压缩.exe`），不影响运行。
-
-> 仓库里 `tools/` 已预置好 qpdf，若直接克隆了整个目录，上面下载 qpdf 那三行可以跳过。
 
 ---
 
@@ -60,6 +50,7 @@ pyinstaller build.spec --noconfirm
 | 压多个文件 | 选文件时按住 Ctrl 多选，界面会显示合计大小 |
 | 图省事 | 把 PDF **拖到 exe 图标上**，启动即自动开压 |
 | 批量拖 | 一次拖多个 PDF 到图标上，每个文件弹一个窗口并行压 |
+| 加密 PDF | 在「打开密码」栏填密码，再点开始；权限加密（不需密码就能打开）留空即可 |
 
 输出永远写在**源文件同目录**，文件名加 `_cleaned` 后缀，**绝不覆盖原件**。
 同名已存在时自动退到 `_cleaned_2.pdf`。
@@ -90,28 +81,39 @@ pyinstaller build.spec --noconfirm
 | 化学试卷 | 18,181,598 B | 1,337,671 B | **7.36%** | 8 → 8 | 8/8 页逐字节相同（144 dpi） | 7,825 字 → 7,825 字 | 10 种全保留 |
 | 参看文献及答案 | 4,838,415 B | 387,405 B | **8.01%** | 4 → 4 | 4/4 页逐字节相同（144 dpi） | 3,033 字 → 3,033 字 | 9 种全保留 |
 
+加密路径另有一套回归（`ci_check_engine.py`，每次 CI 都跑）：
+
+| 样本 | 结果 |
+| --- | --- |
+| RC4-40 / RC4-128 / AES-128 / AES-256（user 密码） | 输出未加密、页数不变、文字与渲染像素与原文件一致 |
+| owner 密码 | 同样能解 |
+| 权限加密（user 密码为空） | 不填密码即可解开 |
+| 口令错误 | 退出码非 0，且不产出任何文件 |
+
 ---
 
 ## 五、常见问题
 
-**Q：提示「缺少 VCRUNTIME140.dll」/ 提示找不到 qpdf？**
-exe 里已内置 qpdf 与全套 VC 运行库。若被杀软隔离，把整个 exe 加白名单即可；
-若你自行删过 `tools/`，用路线 B 里的下载命令补齐。
+**Q：提示「缺少 VCRUNTIME140.dll」？**
+exe 是 PyInstaller 单文件包，正常情况下自带运行库。若被杀软隔离，把整个 exe
+加白名单即可；本版不再需要任何 `tools/` 目录。
 
 **Q：压完反而变大了？**
 内容流本来就是 deflate 的、没有冗余结构时会发生。程序仍会写出文件（便于对比），
 直接用原件就好。
 
 **Q：加密 PDF？**
-GUI 版不提供口令输入框，遇到加密文件会弹窗提示「文件已加密，需用命令行版加 -p 口令」，
-然后跳过这一个文件，其余文件照常处理。命令行版支持（解密由随包 qpdf 完成）：
+在窗口的「打开密码」栏填密码即可，留空则按无密码尝试（权限加密的文件能直接解开）。
+命令行版同样支持：
 
 ```
 PDFCompress.exe 加密.pdf -p 口令
 python pdfstrip.py 加密.pdf -p 口令 -o 输出.pdf
 ```
 
-口令错误的提示是「文件已加密，且当前口令无法解开」，不会产出损坏文件。
+口令错误会明确提示「当前填的密码不对」，不会产出损坏文件。
+只支持 PDF 标准加密（`/Filter /Standard`，覆盖 RC4 40/128、AES-128、AES-256）；
+用数字证书加密的文件不在支持范围内。
 
 **Q：为什么比在线压缩网站慢一点、但效果好得多？**
 在线站多是重编码图片（有损），本工具是**结构化去冗余**（无损）。
@@ -123,35 +125,39 @@ PyInstaller 单文件包常被启发式引擎误报。已关闭 UPX 压缩以降
 
 ---
 
-## 五点半、命令行版（可选）
+## 六、命令行版（可选）
 
-不打包也能用：装好 Python 后把 `pdfstrip.py` 和 `tools/` 拷给对方，一句命令搞定。
-`tools/` 是 Windows 64 位的 qpdf；其他系统换成对应的 qpdf 放到同目录即可。
+不打包也能用：装好 Python 与依赖后，一句命令搞定。
 
 ```bash
+pip install -r requirements.txt
 python pdfstrip.py 试卷.pdf                       # 输出 试卷_cleaned.pdf
 python pdfstrip.py 试卷.pdf -o out.pdf --report   # 顺带打印诊断 JSON
-python pdfstrip.py 加密.pdf -p 口令 -o 输出.pdf     # 加密文件需给口令
+python pdfstrip.py 加密.pdf -p 口令 -o 输出.pdf     # 加密文件给口令
 ```
 
 | 参数 | 作用 |
 | --- | --- |
 | `-o OUT` | 指定输出路径，默认 `<原名>_cleaned.pdf` |
-| `--report` | 打印诊断 JSON：体积构成、对象数、去线性化省了多少 |
-| `-p PASSWORD` | 加密 PDF 的口令 |
+| `--report` | 打印诊断 JSON：体积构成、对象数、解密/线性化标记 |
+| `-p PASSWORD` | 加密 PDF 的打开密码 |
 | `--clean-content` | 额外清空内容流里的注释与多余空白（更彻底，但会改动内容流字节） |
 
 ---
 
-## 六、目录结构
+## 七、目录结构
 
 ```
-pdfstrip/
+pdfclean/
 ├─ pdfstrip.py              清理引擎（也可单独当命令行用）
+├─ pdfdecrypt.py            加密 PDF 解密（RC4 / AES，纯 Python）
 ├─ gui.py                   图形界面
-├─ build.spec               PyInstaller 打包配置
+├─ build.spec               PyInstaller 打包配置（无外部二进制）
 ├─ requirements.txt         打包环境依赖
-├─ tools/                   qpdf.exe + 9 个 DLL（Windows 64 位）
+├─ tests/                   回归样本（含四种加密算法与权限加密）
+├─ ci_check_engine.py       引擎回归（CI 主入口）
+├─ ci_check_gui_env.py      GUI 无控制台环境自检
+├─ ci_check_recursive.py    文件夹递归收集自检
 └─ .github/workflows/
    └─ build-win.yml         自动构建 Windows exe
 ```

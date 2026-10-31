@@ -1,57 +1,40 @@
 # -*- coding: utf-8 -*-
 """CI 自检：GUI 版（console=False）运行环境下的健壮性。
 
-打完包的 exe 里 sys.stdout / sys.stderr 都是 None。任何裸的
-sys.stderr.write(...) 都会抛 AttributeError，把「口令错误」这种
-正常失败变成未捕获异常 —— 用户看到的是一个莫名其妙的错误框。
+打完包的 exe 里 sys.stdout / sys.stderr 都是 None。任何裸的 print /
+sys.stderr.write 都会抛 AttributeError，把「口令错误」这种正常失败
+变成未捕获异常 —— 用户看到的是一个莫名其妙的错误框。
 
-这里把 stderr 置 None 后跑一遍加密文件解密失败路径，
-断言抛的是预期的 SystemExit 而不是 AttributeError。
+这里把 stdout/stderr 置 None 后跑两条路径：
+  1) 空密码打开有密码的 PDF —— 必须抛 SystemExit（中文提示），不是 AttributeError
+  2) 普通 PDF —— 必须正常压完
 
 输出全 ASCII，避免 Windows 控制台 cp1252 编码报错。
 """
 
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+TESTS = os.path.join(HERE, "tests")
+sys.path.insert(0, HERE)
 
 import pdfstrip  # noqa: E402
 
-MINI = (b"%PDF-1.4\n"
-        b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
-        b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
-        b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]>>endobj\n"
-        b"trailer<</Root 1 0 R/Size 4>>\nstartxref\n0\n%%EOF\n")
-
 
 def main():
-    qpdf = pdfstrip._find_qpdf()
-    if not qpdf:
-        raise SystemExit("FAIL: qpdf not found")
+    enc = os.path.join(TESTS, "enc_aes256.pdf")
+    plain = os.path.join(TESTS, "sample.pdf")
+    for p in (enc, plain):
+        if not os.path.exists(p):
+            raise SystemExit("FAIL: missing test sample %s" % p)
 
     tmp = tempfile.mkdtemp(prefix="ci_gui_env_")
+    real_out, real_err = sys.stdout, sys.stderr
     try:
-        raw = os.path.join(tmp, "raw.pdf")
-        with open(raw, "wb") as f:
-            f.write(MINI)
-        # 先用 qpdf 修成合法结构
-        fixed = os.path.join(tmp, "fixed.pdf")
-        subprocess.run([qpdf, "--warning-exit-0", "--object-streams=disable",
-                        raw, fixed], check=True, capture_output=True)
-        # 再造一个需要口令的加密件
-        enc = os.path.join(tmp, "enc.pdf")
-        subprocess.run([qpdf, "--encrypt", "123456", "123456", "256", "--",
-                        "--linearize", fixed, enc],
-                       check=True, capture_output=True)
-
-        real_out, real_err = sys.stdout, sys.stderr
-        # ---- 模拟 console=False 打包后的状态
-        sys.stdout = None
-        sys.stderr = None
+        sys.stdout = sys.stderr = None
         try:
             status = "unknown"
             try:
@@ -63,33 +46,28 @@ def main():
                 status = "AttributeError: %s" % e
             except Exception as e:
                 status = "%s: %s" % (type(e).__name__, e)
+
+            normal_ok = False
+            err_note = ""
+            try:
+                out = os.path.join(tmp, "out.pdf")
+                st = pdfstrip.Strip(plain, "", clean_content=False)
+                st.run(out)
+                normal_ok = os.path.getsize(out) > 0
+            except Exception as e:
+                err_note = "%s: %s" % (type(e).__name__, e)
         finally:
             sys.stdout, sys.stderr = real_out, real_err
 
-        print("stdlib streams set to None ->", status)
+        print("None streams -> password path:", status)
+        print("None streams -> normal path:", "OK" if normal_ok else "FAIL " + err_note)
         if status != "SystemExit":
             raise SystemExit("FAIL: expected SystemExit, got %s" % status)
-
-        # 正路也要能跑：普通文件在 stderr=None 下必须压缩成功
-        sys.stdout = None
-        sys.stderr = None
-        try:
-            out = os.path.join(tmp, "out.pdf")
-            st = pdfstrip.Strip(fixed, "", clean_content=False)
-            info = st.run(out)
-            ok = os.path.getsize(out) > 0
-        except Exception as e:
-            ok = False
-            print("normal path failed:", type(e).__name__, e)
-        finally:
-            sys.stdout, sys.stderr = real_out, real_err
-
-        print("normal path under None streams:", "OK" if ok else "FAIL")
-        if not ok:
+        if not normal_ok:
             raise SystemExit("FAIL: normal compress broke with None streams")
-
         print("gui env robustness: OK")
     finally:
+        sys.stdout, sys.stderr = real_out, real_err
         shutil.rmtree(tmp, ignore_errors=True)
 
 

@@ -1,7 +1,5 @@
-# 精简版依赖：不含 pymupdf（解密改由随包 qpdf 完成，体积约 19 MB）
-# cryptography 是必需的：pypdf 用它做 AES 解密（判断文件是否加密、校验口令都要走它）。
-# 缺了会在 is_encrypted/verify 阶段抛 DependencyError: cryptography>=3.1 is required。
-# 注意 pypdf 3.17.4 的内置依赖声明里没有强制它，必须显式写。
+# 精简版依赖：不含 pymupdf、不含 cryptography，也不再随包携带 qpdf
+# （解密由项目内的 pdfdecrypt.py 完成，AES/RC4 走 pycryptodome）
 pypdf==3.17.4
-cryptography>=42.0
+pycryptodome>=3.19
 pyinstaller==6.22.3

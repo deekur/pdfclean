@@ -128,7 +128,7 @@ from pdfstrip import Strip  # noqa: E402
 APP_TITLE = "PDF 无损压缩"
 DROP_TEXT = "把 PDF 或文件夹拖到这里\n\n或点击选择"
 DROP_TEXT_OFF = "把 PDF 或文件夹拖到这里\n\n或点击选择"
-OUT_HINT = "输出到源文件同目录，文件名后加 _cleaned，不覆盖原文件"
+OUT_HINT = "输出到源文件同目录，文件名后加 _cleaned，不覆盖原文件；加密 PDF 请先填打开密码"
 CLEANED_SUFFIX = "_cleaned"
 
 # 递归时一律不进的目录：隐藏目录（.git/.cache 之类）+ 常见系统回收站
@@ -214,16 +214,15 @@ def collect_pdfs(paths, skips=None):
     return found
 
 
-def compress_one(src):
+def compress_one(src, password=""):
     """压一个文件，返回 (输出路径, 摘要dict)。异常原样抛出，由调用方处理。"""
     dst = out_name(src)
     st = None
     try:
-        st = Strip(src, "", clean_content=False)
+        st = Strip(src, password, clean_content=False)
         info = st.run(dst)
     finally:
-        # 加密临时文件、去线性化/解密临时文件都要清掉，Windows 下不清理会占着句柄。
-        # tmp 已不再由解密流程产生（解密改走 qpdf，落在 tmp_lin），但保留兼容。
+        # 解密用的临时明文文件要及时删，Windows 下不清理会占着句柄
         if st is not None:
             for p in (st.tmp, st.tmp_lin):
                 if p and os.path.exists(p):
@@ -284,6 +283,17 @@ class App(object):
         self.btn_clear = tk.Button(pickbar, text="清空", width=8,
                                    command=self.clear)
         self.btn_clear.pack(side="right")
+
+        # ---- 密码行（只有设置了打开密码的 PDF 才需要填）
+        pwdbar = tk.Frame(body)
+        pwdbar.pack(fill="x", pady=(10, 0))
+        tk.Label(pwdbar, text="打开密码", fg="#5a6673",
+                 font=("Microsoft YaHei UI", 9)).pack(side="left")
+        self.pwd = tk.Entry(pwdbar, show="*", width=22,
+                            font=("Microsoft YaHei UI", 9))
+        self.pwd.pack(side="left", padx=(6, 8))
+        tk.Label(pwdbar, text="加密 PDF 才需要；留空按无密码尝试",
+                 fg="#8a939c", font=("Microsoft YaHei UI", 8)).pack(side="left")
 
         # ---- 选中文件列表
         self.lbl_files = tk.Label(body, text="未选择文件", anchor="w", justify="left",
@@ -500,7 +510,8 @@ class App(object):
     def _lock(self, on):
         """压缩期间锁住所有能改选择的入口，防止后台线程读的列表被中途换掉。"""
         state = "disabled" if on else "normal"
-        for b in (self.btn_pick, self.btn_pickdir, self.btn_clear, self.btn_go):
+        for b in (self.btn_pick, self.btn_pickdir, self.btn_clear, self.btn_go,
+                  self.pwd):
             try:
                 b.config(state=state)
             except Exception:
@@ -518,10 +529,12 @@ class App(object):
         self.btn_open.config(state="disabled")
         self.bar.config(value=0)
         self.lbl_state.config(text="准备中…共 %d 个文件" % len(self.files))
-        t = threading.Thread(target=self.worker, args=(list(self.files),), daemon=True)
+        pwd = self.pwd.get().strip()
+        t = threading.Thread(target=self.worker, args=(list(self.files), pwd),
+                             daemon=True)
         t.start()
 
-    def worker(self, files):
+    def worker(self, files, password=""):
         """后台线程：逐个压缩，进度和结果通过队列回传主线程。"""
         total = len(files)
         results = []
@@ -529,13 +542,13 @@ class App(object):
             self.q.put(("progress", i - 1, total, "第 %d/%d 个：%s"
                         % (i, total, os.path.basename(src))))
             try:
-                dst, info = compress_one(src)
+                dst, info = compress_one(src, password)
                 old = info.get("original") or os.path.getsize(src)
                 new = info.get("bytes") or os.path.getsize(dst)
                 saved = 0.0 if not old else (1.0 - float(new) / old) * 100.0
                 results.append((True, src, dst, old, new, saved, info))
             except SystemExit as e:
-                # 引擎里用 SystemExit 表达「前置条件不满足」，如找不到 qpdf、口令错误
+                # 引擎里用 SystemExit 表达「前置条件不满足」，如口令错误、文件损坏
                 results.append((False, src, None, 0, 0, 0,
                                 {"error": str(e)}))
             except Exception as e:

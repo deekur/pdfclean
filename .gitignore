@@ -3,6 +3,3 @@ __pycache__/
 build/
 dist/
 *.spec.bak
-qpdf.zip
-qpdf_tmp/
-tools/qpdf
